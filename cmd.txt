@@ -1,0 +1,2 @@
+sudo tc qdisc add dev lo root netem delay 100ms 10ms loss 10% reorder 25% 50% rate 1mbit
+sudo tc qdisc del dev lo root
