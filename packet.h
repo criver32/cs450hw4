@@ -40,6 +40,9 @@ public:
 	void print();
 	bool check();
 
+	void setSeqno(unsigned int s) { seqno = s; }
+	void setAckno(unsigned int a) { ackno = a; }
+
 	unsigned long getSrcAddr() { return src_addr; }
 	unsigned short getSrcPort() { return src_port; }
 	unsigned long getDstAddr() { return dst_addr; }

@@ -79,11 +79,13 @@ Packet::Packet(int fd) {
 	int i = unloadHeader();
 
 	recv_length = strlen(payload) + 1;
+	//cout << "~ ackno: " << ackno << endl;
 }
 
 int Packet::sendPacket(int fd, struct sockaddr *addr, int len) {
-	
+	loadHeader();
 	int send_count = sendto(fd, buffer, MSS, 0,addr,len);
+	//cout << "$ ackno: " << ackno << endl;
 	//cout << "Bytes sent: " << send_count << endl;
 	return send_count;
 }
@@ -197,6 +199,7 @@ int Packet::unloadHeader() {
 }
 
 unsigned int Packet::computeChecksum(char *buf, int len) {
+	//return 0;
 	// TODO
 	if (buf == NULL || buf[0] == '\0') return 0;
 	unsigned int result = 7;

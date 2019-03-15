@@ -10,6 +10,7 @@
 #include <sys/uio.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -19,10 +20,35 @@
 
 #include "packet.h"
 
-#define MIN_DELAY 1000
-#define MAX_DELAY 10000000
+#define SEC 1000000
+
+#define MIN_DELAY 100
+#define MAX_DELAY SEC * 3
+#define PENALTY   SEC / 10
+#define MULT	  1.5
 
 using namespace std;
+
+struct timeval timestamp() {
+	struct timeval tv;
+	struct timezone tz;
+	memset(&tv, 0, sizeof(tv));
+	memset(&tz, 0, sizeof(tz));
+	if (gettimeofday(&tv, &tz) < 0) {
+		perror("time:");
+	}
+	return tv;
+}
+
+unsigned long timedif(struct timeval *start, struct timeval *end) {
+	return SEC * ( end->tv_sec - start->tv_sec ) + ( end->tv_usec - start->tv_usec );
+}
+
+void print_addr(struct sockaddr_in *a) {
+	char ip[100];
+	inet_ntop(AF_INET, &(a->sin_addr.s_addr), ip, 100);			
+	printf("ADDR: %s\nPORT: %d\n", ip, ntohs(a->sin_port));
+}
 
 int main(int argc, char** argv) {
 	cout << "This is a sender." << endl;
@@ -37,18 +63,6 @@ int main(int argc, char** argv) {
 		exit(1);
 	}
 
-	int r_fd = socket(AF_INET, SOCK_DGRAM, 0);
-	if(r_fd < 0) {
-		perror("Creating socket failed: ");
-		exit(1);
-	}
-
-	int yes=1;
- 	if (setsockopt(s_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
-		perror("setsockopt");
-		exit(1);
-	}
-
 	struct timeval t;
 	t.tv_sec = 0;
 	t.tv_usec = 100;
@@ -59,8 +73,35 @@ int main(int argc, char** argv) {
 	
 	struct sockaddr_in addr;	 // internet socket address data structure
 	addr.sin_family = AF_INET;
-	addr.sin_port = htons(8081); // byte order is significant
+	addr.sin_port = 0;
 	addr.sin_addr.s_addr = INADDR_ANY;
+	
+	struct sockaddr_in test_addr;	 // internet socket address data structure
+	test_addr.sin_family = AF_INET;
+	test_addr.sin_port = 0;
+	test_addr.sin_addr.s_addr = INADDR_ANY;
+
+	struct sockaddr_in remote_addr;
+	remote_addr.sin_family = AF_INET;
+	remote_addr.sin_port = htons(atoi(argv[2])); // byte order is significant
+	inet_pton(AF_INET,argv[1],&remote_addr.sin_addr.s_addr);
+
+	// Get local address
+	int test_sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if(test_sock < 0) {
+		perror("Creating socket failed: ");
+		exit(1);
+	}
+	connect(test_sock, (struct sockaddr*)&remote_addr, sizeof(remote_addr));
+
+	socklen_t len = sizeof(test_addr);
+	getsockname(test_sock, (struct sockaddr*)&test_addr, &len);
+	unsigned long myaddr = test_addr.sin_addr.s_addr;
+	char myaddr_buf[100];
+	inet_ntop(AF_INET, &(test_addr.sin_addr.s_addr), myaddr_buf, 100);
+
+	shutdown(test_sock,SHUT_RDWR);
+	close(test_sock);
 
 	int res = bind(s_fd, (struct sockaddr*)&addr, sizeof(addr));
 	if(res < 0) {
@@ -68,17 +109,20 @@ int main(int argc, char** argv) {
 		exit(1);
 	}
 
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(atoi(argv[2])); // byte order is significant
-	inet_pton(AF_INET,argv[1],&addr.sin_addr.s_addr);
+	len = sizeof(addr);
+	getsockname(s_fd, (struct sockaddr*)&addr, &len);
+	unsigned short myport = addr.sin_port;
 
+	cout << "Using port " << ntohs(myport) << endl;
+	cout << "At addr " << myaddr_buf << endl;
+	
 	/*
 	Packet(unsigned long _src_addr, unsigned short _src_port,
 		unsigned long _dst_addr, unsigned short _dst_port,
 		bool _syn, bool _ack,
 		unsigned int _seqno, unsigned int _ackno,
 		char *buf)
-	*/	
+	*/
 
 	map<int, Packet> m;
 	FILE *f = NULL;
@@ -92,33 +136,41 @@ int main(int argc, char** argv) {
 	char buf[MSS];
 	memset(buf, '\0', MSS);
 	int i = 0;
-	while(fread(buf,sizeof(char), MSS-HEADER_SIZE, f)) {
+	
+	m.insert( pair<int, Packet>(0, Packet(myaddr,myport,
+						remote_addr.sin_addr.s_addr,
+						remote_addr.sin_port,
+						true, false, 0, 0, NULL) ) );
+
+	while(fread(buf,sizeof(char), MSS-HEADER_SIZE-1, f)) {
 		i++;
-		Packet pkt(0,0,0,0, false, false, i, 0, buf);
+		Packet pkt(myaddr,myport,remote_addr.sin_addr.s_addr,remote_addr.sin_port, false, (i == 1), i, 0, buf);
 		m.insert( pair<int, Packet>(i, pkt) );
 		memset(buf, '\0', MSS);
-		m.at(i).print();
+		//m.at(i).print();
 	}
 	cout << "Total packets stored: " << i << endl;
 	int total = i;
 	int sent = 0;
 
 	int delay = 10000;
+	int start_seq = 0;
+	bool handshaking = true;
 
 	map<int, Packet>::iterator iter;
 	for (iter = m.begin(); iter != m.end(); ++iter) {
-		i = iter->first;
 		Packet pkt = iter->second;
+		i = start_seq + pkt.getSeqno();
+		pkt.setSeqno(i);
 		
 		int x = 0;
 		cout << "Sending packet " << i << "..." << endl;
+		//pkt.print();
 		bool retry = true;
 		while (retry) {
-			pkt.sendPacket(s_fd, (struct sockaddr*)&addr, sizeof(addr));
+			pkt.sendPacket(s_fd, (struct sockaddr*)&remote_addr, sizeof(addr));
 			
-			cout << x << endl;
-			usleep(delay);
-			x++;
+			struct timeval start_t = timestamp();
 			cout << "Waiting for ack... ";
 			bool timeout = false;
 			while (!timeout) {
@@ -126,23 +178,36 @@ int main(int argc, char** argv) {
 				if (ack.isAck() == true && ack.getAckno() == pkt.getSeqno()) {
 					retry = false;
 					cout << "***Got ack: " << ack.getAckno() << endl;
+					if (ack.isSyn() && handshaking) {
+						start_seq = ack.getSeqno();
+						cout << "Handshake complete: " << start_seq << endl;
+						handshaking = false;
+						auto next = iter;
+						next++;
+						next->second.setAckno(ack.getSeqno());
+						//next->second.print();
+					}
 					//ack.print();
 
-					delay = delay - 20000;
+					delay = delay - PENALTY;
 					if (delay < MIN_DELAY) delay = MIN_DELAY;
 					printf("delay: %d\n", delay);
 					break;
 				}
-				if (ack.getTimeout()) {
-					delay = delay * 1.5;
+
+				struct timeval current_t = timestamp();
+				if (delay < timedif(&start_t, &current_t)) {
+					delay = delay * MULT;
 					if (delay > MAX_DELAY) delay = MAX_DELAY;
 					printf("delay: %d\n", delay);
 					timeout = true;
 					break;
 				}
 			}
-			if (timeout)
-				cout << "Retrying..." << endl;
+			if (timeout) {
+				x++;
+				cout << "Retrying... " << x << endl;
+			}
 		}
 		
 		sent++;
