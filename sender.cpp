@@ -20,14 +20,24 @@
 
 #include "packet.h"
 
-#define SEC 1000000
+#define SEC 		1000000
 
-#define MIN_DELAY 100
-#define MAX_DELAY SEC * 3
-#define PENALTY   SEC / 10
-#define MULT	  1.5
+#define ALPHA		0.125
+#define BETA		0.25
+
+#define TIMEOUT_LIMIT	SEC * 10
 
 using namespace std;
+
+int update_rtt(int estimate, int sample) {
+	return (1-ALPHA)*estimate + ALPHA*sample;
+}
+
+int update_dev(int estimate, int sample, int dev) {
+	int dif = sample - estimate;
+	if (dif < 0) dif = dif * -1;
+	return (1-BETA)*dev + BETA*dif;
+}
 
 struct timeval timestamp() {
 	struct timeval tv;
@@ -40,7 +50,7 @@ struct timeval timestamp() {
 	return tv;
 }
 
-unsigned long timedif(struct timeval *start, struct timeval *end) {
+int timedif(struct timeval *start, struct timeval *end) {
 	return SEC * ( end->tv_sec - start->tv_sec ) + ( end->tv_usec - start->tv_usec );
 }
 
@@ -51,8 +61,6 @@ void print_addr(struct sockaddr_in *a) {
 }
 
 int main(int argc, char** argv) {
-	cout << "This is a sender." << endl;
-	
 	if(argc<4) {
 		printf("Usage: ./sender <ip> <port> <filename>\n");
 		exit(1);
@@ -113,9 +121,6 @@ int main(int argc, char** argv) {
 	getsockname(s_fd, (struct sockaddr*)&addr, &len);
 	unsigned short myport = addr.sin_port;
 
-	cout << "Using port " << ntohs(myport) << endl;
-	cout << "At addr " << myaddr_buf << endl;
-	
 	/*
 	Packet(unsigned long _src_addr, unsigned short _src_port,
 		unsigned long _dst_addr, unsigned short _dst_port,
@@ -140,20 +145,30 @@ int main(int argc, char** argv) {
 	m.insert( pair<int, Packet>(0, Packet(myaddr,myport,
 						remote_addr.sin_addr.s_addr,
 						remote_addr.sin_port,
-						true, false, 0, 0, NULL) ) );
+						true, false, 0, 0, NULL, 0) ) );
 
-	while(fread(buf,sizeof(char), MSS-HEADER_SIZE-1, f)) {
+	int bytes_read = fread(buf,sizeof(char), MSS-HEADER_SIZE-1, f);
+	while(bytes_read > 0) {
 		i++;
-		Packet pkt(myaddr,myport,remote_addr.sin_addr.s_addr,remote_addr.sin_port, false, (i == 1), i, 0, buf);
+		Packet pkt(myaddr,myport,remote_addr.sin_addr.s_addr,remote_addr.sin_port, false, (i == 1), i, 0, buf, bytes_read);
 		m.insert( pair<int, Packet>(i, pkt) );
 		memset(buf, '\0', MSS);
 		//m.at(i).print();
+		bytes_read = fread(buf,sizeof(char), MSS-HEADER_SIZE-1, f);
 	}
-	cout << "Total packets stored: " << i << endl;
+
+	{
+		auto iter = m.end();
+		--iter;
+		iter->second.setFin(true);
+	}
+	
+	//cout << "Total packets stored: " << i << endl;
 	int total = i;
 	int sent = 0;
 
-	int delay = 10000;
+	int rtt = 100;
+	int dev = 0;
 	int start_seq = 0;
 	bool handshaking = true;
 
@@ -164,57 +179,65 @@ int main(int argc, char** argv) {
 		pkt.setSeqno(i);
 		
 		int x = 0;
-		cout << "Sending packet " << i << "..." << endl;
-		//pkt.print();
+		//cout << "Sending packet " << i << "..." << endl;
+
+		struct timeval total_time_waiting = timestamp();
 		bool retry = true;
 		while (retry) {
 			pkt.sendPacket(s_fd, (struct sockaddr*)&remote_addr, sizeof(addr));
 			
 			struct timeval start_t = timestamp();
-			cout << "Waiting for ack... ";
+			//cout << "Waiting for ack... ";
 			bool timeout = false;
 			while (!timeout) {
 				Packet ack(s_fd);
+				struct timeval current_t = timestamp();
+				int sample_rtt = timedif(&total_time_waiting, &current_t);
+				if (sample_rtt > TIMEOUT_LIMIT) {
+					printf("RTT:\t%d\nDEV:\t%d\nS:\t%f\n", rtt, dev, (double)(rtt+4*dev)/(double)SEC);
+					cout << "Connection timed out.  Exiting...\n";
+					shutdown(s_fd,SHUT_RDWR);
+					close(s_fd);
+					exit(1);
+				}
+
 				if (ack.isAck() == true && ack.getAckno() == pkt.getSeqno()) {
 					retry = false;
-					cout << "***Got ack: " << ack.getAckno() << endl;
+					//cout << "***Got ack: " << ack.getAckno() << endl;
 					if (ack.isSyn() && handshaking) {
 						start_seq = ack.getSeqno();
-						cout << "Handshake complete: " << start_seq << endl;
+						//cout << "Handshake complete: " << start_seq << endl;
 						handshaking = false;
 						auto next = iter;
 						next++;
 						next->second.setAckno(ack.getSeqno());
-						//next->second.print();
 					}
-					//ack.print();
 
-					delay = delay - PENALTY;
-					if (delay < MIN_DELAY) delay = MIN_DELAY;
-					printf("delay: %d\n", delay);
+					rtt = update_rtt(rtt, sample_rtt);
+					dev = update_dev(rtt, sample_rtt, dev);
+					//printf("RTT:\t%d\nDEV:\t%d\n", rtt, dev);
 					break;
 				}
 
-				struct timeval current_t = timestamp();
-				if (delay < timedif(&start_t, &current_t)) {
-					delay = delay * MULT;
-					if (delay > MAX_DELAY) delay = MAX_DELAY;
-					printf("delay: %d\n", delay);
+				if (rtt+4*dev < timedif(&start_t, &current_t) || SEC * 3 < timedif(&start_t, &current_t)) {
+					//printf("RTT:\t%d\nDEV:\t%d\nS:\t%f\n", rtt, dev, (double)(rtt+4*dev)/(double)SEC);
 					timeout = true;
 					break;
 				}
 			}
 			if (timeout) {
 				x++;
-				cout << "Retrying... " << x << endl;
+				//cout << "Retrying... " << x << endl;
 			}
 		}
 		
 		sent++;
 	}
 	
-	cout << sent << "/" << total << " packets sent" << endl;
+	//cout << sent-1 << "/" << total << " packets sent" << endl;
 	
+	cout << "File transfer complete.  Exiting...\n";
+
 	shutdown(s_fd,SHUT_RDWR);
 	close(s_fd);
 	

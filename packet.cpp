@@ -20,7 +20,7 @@ Packet::Packet(unsigned long _src_addr, unsigned short _src_port,
 		unsigned long _dst_addr, unsigned short _dst_port,
 		bool _syn, bool _ack,
 		unsigned int _seqno, unsigned int _ackno,
-		char *buf) {
+		char *buf, unsigned int _len) {
 	timeout = false;
 
 	memset(buffer, '\0', MSS);
@@ -34,18 +34,17 @@ Packet::Packet(unsigned long _src_addr, unsigned short _src_port,
 	
 	syn = _syn;
 	ack = _ack;
+	fin = false;
 
 	seqno = _seqno;
 	ackno = _ackno;
-	
-	if (buf == NULL || buf[0] == '\0') {
-		length = 0;
-	}
-	else {
-		length = strlen(buf) + 1;
+
+	length = _len;
+	recv_length = length;
+
+	if (buf != NULL) {
 		memcpy(payload, buf, MSS - HEADER_SIZE);
 	}
-	recv_length = length;
 	
 	checksum = computeChecksum(buf, length);
 
@@ -64,6 +63,7 @@ Packet::Packet(int fd) {
 	
 	syn = false;
 	ack = false;
+	fin = false;
 
 	seqno = 0;
 	ackno = 0;
@@ -78,7 +78,7 @@ Packet::Packet(int fd) {
 
 	int i = unloadHeader();
 
-	recv_length = strlen(payload) + 1;
+	recv_length = recv_count;
 	//cout << "~ ackno: " << ackno << endl;
 }
 
@@ -111,6 +111,10 @@ void Packet::print() {
 	if (ack) cout << "1" << endl;
 	else cout << "0" << endl;
 
+	cout << "FIN:\t\t";
+	if (fin) cout << "1" << endl;
+	else cout << "0" << endl;
+
 	cout << "----------------------------------------" << endl;
 	cout << "SEQNO:\t\t" << seqno << endl;
 	cout << "ACKNO:\t\t" << ackno << endl;
@@ -125,9 +129,6 @@ void Packet::print() {
 }
 
 bool Packet::check() {
-	//cout << recv_length << "/" << length << endl;
-	if (recv_length != length)
-		return false;
 	return (computeChecksum(payload, length) == checksum);
 }
 
@@ -149,6 +150,8 @@ int Packet::loadHeader() {
 	i += sizeof(syn);
 	memcpy(&(buffer[i]), &ack, sizeof(ack));
 	i += sizeof(ack);
+	memcpy(&(buffer[i]), &fin, sizeof(fin));
+	i += sizeof(fin);
 
 	memcpy(&(buffer[i]), &seqno, sizeof(seqno));
 	i += sizeof(seqno);
@@ -161,6 +164,8 @@ int Packet::loadHeader() {
 	i += sizeof(checksum);
 	
 	memcpy(&(buffer[i]), payload, MSS - HEADER_SIZE);
+	
+	//cout << "Size of header is: " << i << endl;
 
 	return i;
 }
@@ -182,6 +187,8 @@ int Packet::unloadHeader() {
 	i += sizeof(syn);
 	memcpy(&ack, &(buffer[i]), sizeof(ack));
 	i += sizeof(ack);
+	memcpy(&fin, &(buffer[i]), sizeof(fin));
+	i += sizeof(fin);
 
 	memcpy(&seqno, &(buffer[i]), sizeof(seqno));
 	i += sizeof(seqno);
@@ -199,13 +206,11 @@ int Packet::unloadHeader() {
 }
 
 unsigned int Packet::computeChecksum(char *buf, int len) {
-	//return 0;
 	// TODO
-	if (buf == NULL || buf[0] == '\0') return 0;
+	if (buf == NULL) return 0;
 	unsigned int result = 7;
 	int i;
 	for (i = 0; i < len; i++) {
-		if (buf[i] == '\0') break;
 		result = result*31 + (unsigned int)(buf[i]);
 	}
 	return result;

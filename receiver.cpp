@@ -24,24 +24,18 @@
 
 using namespace std;
 
-//map<int, Packet> m;
-bool loop;
-int sock;
-
 void set_addr(struct sockaddr_in *a, unsigned long addr, unsigned short port) {
 	a->sin_addr.s_addr = addr;
 	a->sin_port = port;
 }
 
-int main(int argc, char** argv) {
-	cout << "This is a receiver." << endl;
-	
+int main(int argc, char** argv) {	
 	if(argc<2) {
-		cout << "Usage: ./receiver <port>\n";
+		fprintf(stderr, "Usage: ./receiver <port>\n");
 		exit(1);
 	}
 	
-	sock = socket(AF_INET, SOCK_DGRAM, 0);
+	int sock = socket(AF_INET, SOCK_DGRAM, 0);
 	if(sock < 0) {
 		perror("Creating socket failed: ");
 		exit(1);
@@ -61,11 +55,13 @@ int main(int argc, char** argv) {
 		exit(1);
 	}
 
+	// local address
 	struct sockaddr_in addr;	 // internet socket address data structure
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(atoi(argv[1])); // byte order is significant
 	addr.sin_addr.s_addr = INADDR_ANY;
 
+	// sender's address
 	struct sockaddr_in remote_addr;	 // internet socket address data structure
 	remote_addr.sin_family = AF_INET;
 	remote_addr.sin_port = 0; // byte order is significant
@@ -86,8 +82,9 @@ int main(int argc, char** argv) {
 	char buf[MSS];
 	memset(buf,'\0',MSS);
 	int current = 1000;
-	loop = true;
+	bool loop = true;
 	bool handshaking = true;
+	bool complete = false;
 	map<int, Packet> m;
 	// Receive data
 	while(1) {
@@ -108,40 +105,37 @@ int main(int argc, char** argv) {
 			unsigned long _dst_addr, unsigned short _dst_port,
 			bool _syn, bool _ack,
 			unsigned int _seqno, unsigned int _ackno,
-			char *buf) */
+			char *buf, int len) */
 
 		if (pkt.isSyn()) {
 			if (dst_port != pkt.getSrcPort() || dst_addr != pkt.getSrcAddr()) {
-				handshaking = true;
-				dst_port = pkt.getSrcPort();
-				dst_addr = pkt.getSrcAddr();
-			}
-			myaddr = pkt.getDstAddr();
-			set_addr(&remote_addr, pkt.getSrcAddr(), pkt.getSrcPort());
-			cout << "Got syn." << endl;
-			//pkt.print();
+				if (handshaking) {
+					dst_port = pkt.getSrcPort();
+					dst_addr = pkt.getSrcAddr();
+					myaddr = pkt.getDstAddr();
+					set_addr(&remote_addr, pkt.getSrcAddr(), pkt.getSrcPort());
 
-			Packet ack(myaddr,myport,dst_port,dst_addr, true, true, current, pkt.getSeqno(), NULL);
+				}
+				else {
+					fprintf(stderr, "Error: received SYN from a different sender.  Exiting...\n");
+					shutdown(sock,SHUT_RDWR);
+					close(sock);
+					exit(1);
+				}
+			}
+			Packet ack(myaddr,myport,dst_port,dst_addr, true, true, current, pkt.getSeqno(), NULL, 0);
 			ack.sendPacket(sock, (struct sockaddr*)&remote_addr, sizeof(remote_addr));
-			//cout << "Sent ack." << endl;
-			//ack.print();
 		}
 		else if (pkt.check()) {
 			if (handshaking && pkt.isAck() == false) {
-				cout << "Packet ignored during handshake..." << endl;
+				//cout << "Packet ignored during handshake..." << endl;
 				continue;
 			}
 			
-/*
-			if (handshaking == false && pkt.isAck()) {
-				cout << "Got an ack, but handshake already finished..." << endl;
-				continue;
-			}
-*/
 			if (handshaking && pkt.isAck()) {
 				//cout << "got ack:" << pkt.getSeqno() << "/" << current << endl;
 				if (pkt.getAckno() != current) {
-					cout << "Wrong ackno during handshake... " << pkt.getAckno() << "/" << current << endl;
+					//cout << "Wrong ackno during handshake... " << pkt.getAckno() << "/" << current << endl;
 					//pkt.print();
 					continue;
 				}
@@ -153,40 +147,51 @@ int main(int argc, char** argv) {
 			if (m.count(pkt.getSeqno()) < 1) { // If we haven't received this packet yet, store it
 				m.insert( pair<int, Packet>(pkt.getSeqno(), pkt) );
 				current++;
-				cout << "***Received packet with seqno " << pkt.getSeqno() << "... ";
+				//cout << "***Received packet with seqno " << pkt.getSeqno() << "... ";
 			}
 			else {
-				cout << "Duplicate seqno " << pkt.getSeqno() << "... ";
+				//cout << "Duplicate seqno " << pkt.getSeqno() << "... ";
 			}
 
 			// Send an ack
-			Packet ack(myaddr,myport,dst_port,dst_addr, false, true, pkt.getSeqno(), pkt.getSeqno(), NULL);
+			Packet ack(myaddr,myport,dst_port,dst_addr, false, true, pkt.getSeqno(), pkt.getSeqno(), NULL, 0);
 			ack.sendPacket(sock, (struct sockaddr*)&remote_addr, sizeof(remote_addr));
-			cout << "Sent ack." << endl;
+			if (pkt.isFin()) {
+				//fprintf(stderr, "File transfer complete.\n");
+				complete = true;
+				break;
+			}
 		}
 		else {
-			cout << "Checksum failed" << endl;
+			//cout << "Checksum failed" << endl;
 		}
 	}
 
+	/*
 	// Prepare output file
 	FILE *f = fopen("out.txt","w");
 	if(!f) {
 		perror("problem creating output file");
 		exit(1);
-	}
+	}	*/
 	
 	// Write to file
 	for (map<int, Packet>::iterator iter = m.begin(); iter != m.end(); ++iter) {
 		char *p = iter->second.getPayload();
 		//iter->second.print();
 		//cout << "writing:" << endl << p << endl << endl;
-		fprintf(f, "%s", p);
+		//fprintf(f, "%s", p);
+		//fwrite(p, 1, iter->second.getLength(), f);
+		//iter->second.print();
+		write(1, p, iter->second.getLength());
 	}
-	fclose(f);
+	//fclose(f);
 
-	//shutdown(sock,SHUT_RDWR);
-	//close(sock);
-	
+	shutdown(sock,SHUT_RDWR);
+	close(sock);
+	if (complete)
+		fprintf(stderr, "File transfer complete.  Exiting...\n");
+	else
+		fprintf(stderr, "Connection timed out.  Exiting...\n");
 	return 0;
 }

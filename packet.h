@@ -1,6 +1,6 @@
 
 #define MSS 1500
-#define HEADER_SIZE 40
+#define HEADER_SIZE 50
 
 class Packet {
 private:
@@ -11,6 +11,7 @@ private:
 
 	bool syn;
 	bool ack;
+	bool fin;
 
 	unsigned int seqno;
 	unsigned int ackno;
@@ -33,13 +34,14 @@ public:
 		unsigned long _dst_addr, unsigned short _dst_port,
 		bool _syn, bool _ack,
 		unsigned int _seqno, unsigned int _ackno,
-		char *buf);
+		char *buf, unsigned int _len);
 
 	Packet(int fd);
 	int sendPacket(int fd, struct sockaddr *addr, int len);
 	void print();
 	bool check();
 
+	void setFin(bool f) { fin = f; }
 	void setSeqno(unsigned int s) { seqno = s; }
 	void setAckno(unsigned int a) { ackno = a; }
 
@@ -49,9 +51,10 @@ public:
 	unsigned short getDstPort() { return dst_port; }
 	bool isSyn() { return syn; }
 	bool isAck() { return ack; }
+	bool isFin() { return fin; }
 	unsigned int getSeqno() { return seqno; }
 	unsigned int getAckno() { return ackno; }
-	int getLength() { return length; }
+	unsigned int getLength() { return length; }
 	char* getPayload() { return payload; }
 	bool getTimeout() { return timeout; }
 
